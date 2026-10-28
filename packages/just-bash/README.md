@@ -133,6 +133,12 @@ All commands support `--help` for usage information.
 
 </details>
 
+## Ripgrep Compatibility
+
+`rg` supports ripgrep-style search options, including `--line-number --heading --color never`, context with `-C`, file types, globs, per-file match limits, and paths-only output. Use `--` before a pattern that starts with `-`. Heading mode separates files with a blank line and omits the heading for one explicitly named file. Exit codes are 0 for matches, 1 for no matches, and 2 for command/search errors; execution limits remain enforced by the sandbox.
+
+Unlike real ripgrep, `rg` defaults to smart-case matching: lowercase patterns match case-insensitively. Use `-s` for case-sensitive matching or `-i` for case-insensitive matching. All accepted `--color` choices (`never`, `auto`, `always`, `ansi`) emit plain text. `--max-count 0` selects no matches; omitting the option leaves the match count unlimited within execution limits. Run `rg --help` for supported options.
+
 ## Configuration
 
 ```typescript

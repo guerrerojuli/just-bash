@@ -530,8 +530,8 @@ export class Interpreter {
   }
 
   private async executePipeline(node: PipelineNode): Promise<ExecResult> {
-    return executePipelineHelper(this.ctx, node, (cmd, stdin) =>
-      this.executeCommand(cmd, stdin),
+    return executePipelineHelper(this.ctx, node, (cmd, stdin, stdinOwned) =>
+      this.executeCommand(cmd, stdin, stdinOwned),
     );
   }
 
@@ -580,7 +580,7 @@ export class Interpreter {
     this.ctx.coverage?.hit(`bash:cmd:${node.type}`);
     switch (node.type) {
       case "SimpleCommand":
-        return this.executeSimpleCommand(node, stdin);
+        return this.executeSimpleCommand(node, stdin, stdinOwned);
       case "If":
         return executeIf(this.ctx, node);
       case "For":
@@ -611,12 +611,18 @@ export class Interpreter {
   private async executeSimpleCommand(
     node: SimpleCommandNode,
     stdin: string,
+    stdinProvided: boolean,
   ): Promise<ExecResult> {
     let transaction: RedirectionTransaction | undefined;
     try {
-      return await this.executeSimpleCommandInner(node, stdin, (created) => {
-        transaction = created;
-      });
+      return await this.executeSimpleCommandInner(
+        node,
+        stdin,
+        stdinProvided,
+        (created) => {
+          transaction = created;
+        },
+      );
     } catch (error) {
       transaction?.finish();
       if (error instanceof GlobError) {
@@ -632,6 +638,7 @@ export class Interpreter {
   private async executeSimpleCommandInner(
     node: SimpleCommandNode,
     stdin: string,
+    stdinProvided: boolean,
     onTransaction: (transaction: RedirectionTransaction) => void,
   ): Promise<ExecResult> {
     // Update currentLine for $LINENO
@@ -724,10 +731,8 @@ export class Interpreter {
         const redirected = await applyRedirections(
           this.ctx,
           baseResult,
-          node.redirections,
-          preparedRedirections.targets,
-          preparedRedirections.dupSources,
-          preparedRedirections.standardRoutes,
+          node.redirections.length > 0,
+          preparedRedirections.outputRoutes,
         );
         transaction.finish();
         return redirected;
@@ -879,7 +884,14 @@ export class Interpreter {
       return preparedRedirectionError(preparedRedirections);
     }
     const stdinSourceFd = preparedRedirections.stdinSourceFd;
+    // Builtins (eval, functions, wrappers) treat any fd-0 route as ownership,
+    // including one a persistent `exec <` set up earlier. External commands
+    // count only a pipeline or this command's own fd-0 replacement as direct
+    // input and otherwise fall back to the enclosing stdin. That fallback
+    // still differs from bash after an empty persistent `exec <` (bash: EOF).
     const stdinRedirected = preparedRedirections.stdin !== undefined;
+    const directStdinProvided =
+      stdinProvided || preparedRedirections.stdinReplaced;
     if (preparedRedirections.stdin !== undefined) {
       stdin = preparedRedirections.stdin;
     }
@@ -959,6 +971,8 @@ export class Interpreter {
         false,
         stdinSourceFd,
         stdinRedirected,
+        directStdinProvided,
+        preparedRedirections.stdinUnavailable,
       );
     } catch (error) {
       // For break/continue, we still need to apply redirections before propagating
@@ -991,10 +1005,8 @@ export class Interpreter {
     cmdResult = await applyRedirections(
       this.ctx,
       cmdResult,
-      node.redirections,
-      preparedRedirections.targets,
-      preparedRedirections.dupSources,
-      preparedRedirections.standardRoutes,
+      node.redirections.length > 0,
+      preparedRedirections.outputRoutes,
       cmdResult.internalProducerCommand ?? commandName,
       cmdResult.internalProducerOmitsShellPrefix,
     );
@@ -1086,11 +1098,13 @@ export class Interpreter {
     useDefaultPath = false,
     stdinSourceFd = -1,
     stdinRedirected = false,
+    stdinProvided = false,
+    stdinUnavailable = false,
   ): Promise<ExecResult> {
     const dispatchCtx: BuiltinDispatchContext = {
       ctx: this.ctx,
-      runCommand: (name, a, qa, s, sf, udp, ssf, sr) =>
-        this.runCommand(name, a, qa, s, sf, udp, ssf, sr),
+      runCommand: (name, a, qa, s, sf, udp, ssf, sr, sp, sd) =>
+        this.runCommand(name, a, qa, s, sf, udp, ssf, sr, sp, sd),
       buildExportedEnv: () => this.buildExportedEnv(),
       executeUserScript: (path, a, s) => this.executeUserScript(path, a, s),
     };
@@ -1106,6 +1120,8 @@ export class Interpreter {
       useDefaultPath,
       stdinSourceFd,
       stdinRedirected,
+      stdinProvided,
+      stdinUnavailable,
     );
 
     if (builtinResult !== null)
@@ -1120,6 +1136,8 @@ export class Interpreter {
       args,
       stdin,
       useDefaultPath,
+      stdinProvided,
+      stdinUnavailable,
     );
     return { ...externalResult, internalProducerCommand: commandName };
   }
